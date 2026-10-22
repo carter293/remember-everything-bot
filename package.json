@@ -1,0 +1,40 @@
+{
+  "name": "learning-bot",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vercel dev",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "drizzle-kit migrate",
+    "db:studio": "drizzle-kit studio",
+    "telegram:setup": "node --env-file=.env.local scripts/set-webhook.mjs",
+    "tick:local": "node --env-file=.env.local -e \"fetch('http://localhost:3000/api/tick',{method:'POST',headers:{authorization:'Bearer '+process.env.TICK_SECRET}}).then(r=>console.log(r.status))\"",
+    "test:db": "DB_TESTS=1 node --env-file=.env.local node_modules/vitest/vitest.mjs run src/repo.db.test.ts"
+  },
+  "dependencies": {
+    "@ai-sdk/google": "^4.0.102",
+    "@modelcontextprotocol/server": "^2.3.1",
+    "@neon/config": "^1.9.3",
+    "@neon/env": "^1.6.4",
+    "@neondatabase/serverless": "^1.2.0",
+    "@vercel/functions": "^3.10.3",
+    "ai": "^7.0.148",
+    "drizzle-orm": "^0.45.4",
+    "grammy": "^1.46.0",
+    "hono": "^4.13.13",
+    "mcp-handler": "^2.3.0",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.5",
+    "drizzle-kit": "^0.31.11",
+    "typescript": "^7.0.2",
+    "vercel": "^65.1.0",
+    "vitest": "^5.0.5"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
