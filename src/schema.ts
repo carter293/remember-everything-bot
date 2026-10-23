@@ -49,6 +49,7 @@ export const reviews = pgTable(
 
 export const sessionStatuses = ['open', 'closing', 'closed', 'abandoned'] as const;
 
+// Quiz transcripts kept for history; no code reads or writes this table.
 // At most one open/closing session is enforced by the `sessions_one_open` index in a custom migration.
 export const sessions = pgTable(
   'sessions',
@@ -68,6 +69,13 @@ export const sessions = pgTable(
   (t) => [check('sessions_status_valid', sql`${t.status} IN ('open','closing','closed','abandoned')`)],
 );
 
+// AI SDK ModelMessages, one row each, stored verbatim so Gemini thought signatures survive between turns.
+export const chatMessages = pgTable('chat_messages', {
+  id: integer().primaryKey().generatedAlwaysAsIdentity(),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  message: jsonb().$type<ModelMessage>().notNull(),
+});
+
 export const appState = pgTable('app_state', {
   key: text().primaryKey(),
   value: text().notNull(),
@@ -76,3 +84,4 @@ export const appState = pgTable('app_state', {
 export type Topic = typeof topics.$inferSelect;
 export type Review = typeof reviews.$inferSelect;
 export type Session = typeof sessions.$inferSelect;
+export type ChatMessage = typeof chatMessages.$inferSelect;

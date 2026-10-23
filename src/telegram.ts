@@ -1,9 +1,8 @@
 import { Bot, InlineKeyboard, type Context } from 'grammy';
-import { librarianTurn, quizOpen, quizTurn } from './agent.js';
+import { chatTurn, startQuiz } from './agent.js';
 import { env } from './env.js';
 import { londonToday } from './london.js';
 import * as repo from './repo.js';
-import { closedSummary, closeSession } from './review-writer.js';
 
 const MAX_MESSAGE = 4000;
 
@@ -21,7 +20,7 @@ const HELP = `I quiz you on what you've saved, on a spaced-repetition schedule.
 • /due — show what's due now
 • /topics — list all topics
 • /done — end the quiz and get your score
-• Outside a quiz, message me to save or search knowledge.`;
+• Message me any time to save, search or reschedule topics, or say "quiz me on X".`;
 
 export async function sendText(chatId: number, text: string, keyboard?: InlineKeyboard): Promise<void> {
   for (let i = 0; i < text.length; i += MAX_MESSAGE) {
@@ -39,11 +38,6 @@ export async function sendDueList(chatId: number): Promise<boolean> {
   for (const topic of due) keyboard.text(topic.title.slice(0, 40), `q:${topic.id}`).row();
   await sendText(chatId, `📚 Due today (${due.length}):`, keyboard);
   return true;
-}
-
-function isUniqueViolation(err: unknown): boolean {
-  const e = err as { code?: string; cause?: { code?: string } };
-  return e?.code === '23505' || e?.cause?.code === '23505';
 }
 
 async function reply(ctx: Context, text: string): Promise<void> {
@@ -76,18 +70,6 @@ bot.use(async (ctx, next) => {
   await next();
 });
 
-// A session idle for over an hour is reviewed before handling anything new.
-bot.use(async (ctx, next) => {
-  await guarded(async (ctx) => {
-    const open = await repo.getOpenSession();
-    if (open && repo.isIdle(open)) {
-      const closed = await closeSession(open.id, 'idle');
-      if (closed) await reply(ctx, `Closed your earlier session.\n${closedSummary(closed)}`);
-    }
-  })(ctx);
-  await next();
-});
-
 bot.command(['start', 'help'], guarded((ctx) => reply(ctx, HELP)));
 
 bot.command(
@@ -109,11 +91,9 @@ bot.command(
 bot.command(
   'done',
   guarded(async (ctx) => {
-    const open = await repo.getOpenSession();
-    if (!open) return reply(ctx, 'No quiz is open.');
+    if (!(await repo.getActiveQuiz())) return reply(ctx, 'No quiz is open.');
     await ctx.replyWithChatAction('typing');
-    const closed = await closeSession(open.id, 'done');
-    await reply(ctx, closed ? closedSummary(closed) : 'Session closed without a review (no answers given).');
+    await reply(ctx, await chatTurn('/done — end the quiz now and record the review.', { forceReview: true }));
   }),
 );
 
@@ -121,28 +101,11 @@ bot.callbackQuery(
   /^q:(.+)$/,
   guarded(async (ctx) => {
     await ctx.answerCallbackQuery();
-    const topicId = ctx.match![1];
-    const topic = await repo.getTopic(topicId);
-    if (!topic || topic.status === 'archived') return reply(ctx, 'That topic was deleted.');
-
-    const open = await repo.getOpenSession();
-    if (open?.topicId === topic.id) return reply(ctx, `You're already in the ${topic.title} quiz. Keep going, or /done.`);
-    if (open) {
-      await ctx.replyWithChatAction('typing');
-      const closed = await closeSession(open.id, 'switch');
-      if (closed) await reply(ctx, `Closed the previous session.\n${closedSummary(closed)}`);
-    }
-
-    let session;
-    try {
-      session = await repo.openSession(topic.id);
-    } catch (err) {
-      if (isUniqueViolation(err)) return reply(ctx, 'A session is already open or being reviewed. Try again in a moment.');
-      throw err;
-    }
+    const started = await startQuiz(ctx.match![1]);
+    if ('error' in started) return reply(ctx, started.error);
     await ctx.replyWithChatAction('typing');
-    const reviews = await repo.recentReviews(topic.id, 3);
-    await reply(ctx, `🧠 ${topic.title}\n\n${await quizOpen(session, topic, reviews)}`);
+    const { title } = started.topic;
+    await reply(ctx, `🧠 ${title}\n\n${await chatTurn(`Quiz me on "${title}".`)}`);
   }),
 );
 
@@ -152,12 +115,7 @@ bot.on(
     const text = ctx.message!.text!;
     if (text.startsWith('/')) return reply(ctx, HELP);
     await ctx.replyWithChatAction('typing');
-    const open = await repo.getOpenSession();
-    if (!open) return reply(ctx, await librarianTurn(text));
-    const topic = await repo.getTopic(open.topicId);
-    if (!topic) return reply(ctx, 'The topic for this session no longer exists. Send /done.');
-    const reviews = await repo.recentReviews(topic.id, 3);
-    await reply(ctx, await quizTurn(open, topic, reviews, text));
+    await reply(ctx, await chatTurn(text));
   }),
 );
 

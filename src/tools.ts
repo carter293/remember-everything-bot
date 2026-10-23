@@ -45,7 +45,7 @@ export const updateTopicInput = z.object({
 export const UPDATE_TOPIC_DESCRIPTION =
   'Rename a topic, change its description, or reschedule its next quiz (next_due_on or due_in_days). Rescheduling moves only the due date; the review interval still comes from quiz scores. Notes are append-only; use append_to_topic for those.';
 
-/** Shared by the MCP server and the librarian agent. */
+/** Shared by the MCP server and the chat agent. */
 export async function applyTopicUpdate(input: z.infer<typeof updateTopicInput>, todayLondon: string) {
   const nextDueOn = resolveDueOn({ nextDueOn: input.next_due_on, dueInDays: input.due_in_days }, todayLondon);
   const patch = {
@@ -58,7 +58,7 @@ export async function applyTopicUpdate(input: z.infer<typeof updateTopicInput>, 
   return topic ? topicSummary(topic) : { error: 'Topic not found or archived' };
 }
 
-/** DB tools shared by the quiz and librarian agents. */
+/** DB tools for the chat agent. */
 export function dbTools(ctx: { todayLondon: string }) {
   return {
     search_topics: tool({

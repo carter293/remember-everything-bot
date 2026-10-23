@@ -1,8 +1,11 @@
 import type { ModelMessage } from 'ai';
-import { and, asc, desc, eq, exists, ilike, lt, lte, or, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, exists, gte, ilike, lte, max, or, sql } from 'drizzle-orm';
 import { db } from './db.js';
-import { appState, reviews, sessions, topics, type Review, type Session, type Topic } from './schema.js';
 import { addDays } from './london.js';
+import { parseActiveQuiz, trimToUserTurn, type ActiveQuiz } from './quiz.js';
+import { appState, chatMessages, reviews, topics, type Review, type Topic } from './schema.js';
+
+const ACTIVE_QUIZ = 'active_quiz';
 
 const isActive = eq(topics.status, 'active');
 
@@ -92,7 +95,7 @@ export async function findTopicByTitle(title: string): Promise<Topic | undefined
   return topic;
 }
 
-/** Soft delete. Also abandons an open quiz on the topic so it is never reviewed. */
+/** Soft delete. Also ends an active quiz on the topic so it is never reviewed. */
 export async function archiveTopic(id: string): Promise<Topic | undefined> {
   const [[topic]] = await db.batch([
     db
@@ -100,10 +103,10 @@ export async function archiveTopic(id: string): Promise<Topic | undefined> {
       .set({ status: 'archived', archivedAt: sql`now()` })
       .where(and(eq(topics.id, id), isActive))
       .returning(),
+    // CASE fixes the evaluation order: other app_state values are not JSON and would fail the cast.
     db
-      .update(sessions)
-      .set({ status: 'abandoned', closedAt: sql`now()` })
-      .where(and(eq(sessions.topicId, id), eq(sessions.status, 'open'))),
+      .delete(appState)
+      .where(sql`CASE WHEN ${appState.key} = ${ACTIVE_QUIZ} THEN (${appState.value}::jsonb->>'topicId') = ${id} ELSE false END`),
   ]);
   return topic;
 }
@@ -119,57 +122,7 @@ export function recentReviews(topicId: string, limit = 3): Promise<Review[]> {
     .limit(limit);
 }
 
-// Sessions
-
-export async function getOpenSession(): Promise<Session | undefined> {
-  const [session] = await db.select().from(sessions).where(eq(sessions.status, 'open'));
-  return session;
-}
-
-export async function getSession(id: string): Promise<Session | undefined> {
-  const [session] = await db.select().from(sessions).where(eq(sessions.id, id));
-  return session;
-}
-
-/** Throws a unique violation on `sessions_one_open` if another session is open or closing. */
-export async function openSession(topicId: string): Promise<Session> {
-  const [session] = await db.insert(sessions).values({ topicId }).returning();
-  return session;
-}
-
-export async function appendMessages(sessionId: string, messages: ModelMessage[]): Promise<void> {
-  await db
-    .update(sessions)
-    .set({
-      messages: sql`${sessions.messages} || ${JSON.stringify(messages)}::jsonb`,
-      lastActivityAt: sql`now()`,
-    })
-    .where(eq(sessions.id, sessionId));
-}
-
-/** Moves an open session to `closing`. Returns undefined if another caller already claimed it. */
-export async function claimSessionForClose(id: string): Promise<Session | undefined> {
-  const [session] = await db
-    .update(sessions)
-    .set({ status: 'closing' })
-    .where(and(eq(sessions.id, id), eq(sessions.status, 'open')))
-    .returning();
-  return session;
-}
-
-export async function reopenSession(id: string): Promise<void> {
-  await db
-    .update(sessions)
-    .set({ status: 'open' })
-    .where(and(eq(sessions.id, id), eq(sessions.status, 'closing')));
-}
-
-export async function abandonSession(id: string): Promise<void> {
-  await db.update(sessions).set({ status: 'abandoned', closedAt: sql`now()` }).where(eq(sessions.id, id));
-}
-
-export async function finishSession(input: {
-  sessionId: string;
+export async function recordReview(input: {
   topicId: string;
   review: { score: number; scoringNote: string; notes: string; transcriptExcerpt: string };
   interval: number;
@@ -188,28 +141,57 @@ export async function finishSession(input: {
         nextDueOn: input.nextDueOn,
       })
       .where(eq(topics.id, input.topicId)),
-    db
-      .update(sessions)
-      .set({ status: 'closed', closedAt: sql`now()`, reviewId })
-      .where(eq(sessions.id, input.sessionId)),
+    db.delete(appState).where(eq(appState.key, ACTIVE_QUIZ)),
   ]);
   return reviewId;
 }
 
-export function staleOpenSessions(olderThanMinutes = 60): Promise<Session[]> {
-  return db
-    .select()
-    .from(sessions)
-    .where(
-      and(
-        eq(sessions.status, 'open'),
-        lt(sessions.lastActivityAt, sql`now() - make_interval(mins => ${olderThanMinutes})`),
-      ),
-    );
+// Chat history
+
+export async function appendChatMessages(messages: ModelMessage[]): Promise<void> {
+  if (messages.length === 0) return;
+  await db.insert(chatMessages).values(messages.map((message) => ({ message })));
 }
 
-export function isIdle(session: Session, now = new Date(), minutes = 60): boolean {
-  return now.getTime() - session.lastActivityAt.getTime() > minutes * 60_000;
+export async function lastChatMessageId(): Promise<number> {
+  const [row] = await db.select({ id: max(chatMessages.id) }).from(chatMessages);
+  return row?.id ?? 0;
+}
+
+/**
+ * The newest `limit` messages, reaching further back to `fromId` when given, never more than `cap`.
+ * The result always starts at a user message.
+ */
+export async function chatHistory(opts: { limit: number; fromId?: number; cap: number }): Promise<ModelMessage[]> {
+  const window = await db
+    .select({ id: chatMessages.id })
+    .from(chatMessages)
+    .orderBy(desc(chatMessages.id))
+    .limit(opts.limit);
+  const starts = [window.at(-1)?.id, opts.fromId].filter((id): id is number => id !== undefined);
+  if (starts.length === 0) return [];
+  const from = Math.min(...starts);
+  const rows = await db
+    .select({ message: chatMessages.message })
+    .from(chatMessages)
+    .where(gte(chatMessages.id, from))
+    .orderBy(desc(chatMessages.id))
+    .limit(opts.cap);
+  return trimToUserTurn(rows.reverse().map((r) => r.message));
+}
+
+// Active quiz
+
+export async function getActiveQuiz(): Promise<ActiveQuiz | undefined> {
+  return parseActiveQuiz(await getState(ACTIVE_QUIZ));
+}
+
+export function setActiveQuiz(quiz: ActiveQuiz): Promise<void> {
+  return setState(ACTIVE_QUIZ, JSON.stringify(quiz));
+}
+
+export async function clearActiveQuiz(): Promise<void> {
+  await db.delete(appState).where(eq(appState.key, ACTIVE_QUIZ));
 }
 
 // App state
